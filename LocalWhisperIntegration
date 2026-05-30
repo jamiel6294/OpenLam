@@ -1,0 +1,127 @@
+Here is what i actioned to get a local Whisper model of my choice setup the way i wanted.
+
+If you use the local setup by default it goes to faster-whisper Huggingface repo.
+
+I wanted to use OpenAI's original Whisper first to get best results before diverging! 
+
+***Notes***
+Used ahmetoner/whisper-asr-webservice docker image. 
+The main issue is that Open WebUI’s “OpenAI STT” integration expects OpenAI-compatible endpoints, while ahmetoner/whisper-asr-webservice exposes /asr, not the OpenAI-style /v1/audio/transcriptions and /v1/audio/translations routes.
+So when Open WebUI is configured as:
+Provider: OpenAI
+Base URL: http://whisper:9000/v1
+Model: whisper-1
+it will try to call something like:
+POST /v1/audio/transcriptions
+but the container i choose only provides:
+POST /asr
+
+So thought process was create fastapi in python to change that and make it work!
+
+Planned Architecture:
+
+Open WebUI
+     |
+     v
+OpenAI-compatible proxy
+     |
+     v
+whisper-asr-webservice
+
+Current Architecture:
+Ubuntu VM
+│
+├─ Ollama (systemd)
+│    └─ 11434
+│
+├─ Open WebUI (Docker)
+│    └─ 3000
+│
+└─ Whisper ASR (Docker)
+     └─ 9000
+
+So following work went into it:
+```
+mkdir ~/whisper-proxy
+cd ~/whisper-proxy
+nano app.py```
+
+```from fastapi import FastAPI, UploadFile, File, Form
+import requests
+
+app = FastAPI()
+
+WHISPER_URL = "http://host-gateway:9000/asr"
+
+@app.post("/v1/audio/transcriptions")
+async def transcribe(
+    file: UploadFile = File(...),
+    model: str = Form(...)
+):
+    files = {
+        "audio_file": (
+            file.filename,
+            await file.read(),
+            file.content_type
+        )
+    }
+
+    r = requests.post(
+        f"{WHISPER_URL}?task=transcribe&output=json",
+        files=files
+    )
+
+    return r.json()
+
+
+@app.post("/v1/audio/translations")
+async def translate(
+    file: UploadFile = File(...),
+    model: str = Form(...)
+):
+    files = {
+        "audio_file": (
+            file.filename,
+            await file.read(),
+            file.content_type
+        )
+    }
+
+    r = requests.post(
+        f"{WHISPER_URL}?task=translate&output=json",
+        files=files
+    )
+
+    return r.json()```
+
+nano Dockerfile
+
+```FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+RUN pip install fastapi uvicorn requests python-multipart
+
+# Copy the FastAPI app
+COPY app.py .
+
+# Run the app
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]```
+
+docker build -t whisper-proxy .
+
+
+docker run -d \
+  --name whisper-proxy \
+  --add-host=host-gateway:host-gateway \
+  -p 8000:8000 \
+  whisper-proxy
+
+Configure Open WebUI
+
+Go to Admin → Audio Settings:
+Provider: OpenAI
+Base URL: http://host-gateway:8000/v1
+API Key: leave blank or put dummy
+Model: whisper-1
