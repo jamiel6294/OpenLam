@@ -1,0 +1,212 @@
+Work went underway to get transcription working. 
+Now i also wanted Translation as a feature!
+
+
+The good news is that the FASTAPI proxy already exposes:
+
+```text
+POST /v1/audio/translations
+```
+
+which forwards to:
+
+```text
+/asr?task=translate
+```
+
+on Whisper-ASR.
+
+The question is whether Open WebUI actually sends translation requests.
+
+## First, i test Whisper-ASR translation directly
+
+On the Ubuntu host:
+
+```bash
+curl \
+  -X POST \
+  -F "audio_file=@spanish.mp3" \
+  "http://localhost:9000/asr?task=translate&output=json"
+```
+
+If the MP3 contains Spanish speech, you should receive English text.
+
+Example:
+
+```json
+{
+  "text": "Hello, how are you today?"
+}
+```
+
+If that works, Whisper translation is functioning.
+
+---
+
+## Test the FAST API proxy translation endpoint
+
+Try:
+
+```bash
+curl \
+  -X POST \
+  -F "file=@spanish.mp3" \
+  -F "model=whisper-1" \
+  http://localhost:8000/v1/audio/translations
+```
+
+You should see the translated English text returned.
+
+
+---
+
+## The Open WebUI limitation
+
+Open WebUI generally uses speech-to-text for:
+
+```text
+Audio
+  ↓
+Transcription
+  ↓
+Prompt text
+```
+
+and usually calls:
+
+```text
+/v1/audio/transcriptions
+```
+
+not:
+
+```text
+/v1/audio/translations
+```
+
+for microphone uploads.
+
+So even though the backend now supports translations, Open WebUI may never request them.
+
+---
+
+## Easy workaround
+
+You can let Whisper transcribe in the original language:
+
+```text
+Spanish audio
+      ↓
+Whisper transcription
+      ↓
+Spanish text
+      ↓
+LLM
+      ↓
+English translation
+```
+
+For many use cases this is perfectly fine.
+
+Example prompt:
+
+```text
+Transcribe this audio and translate it to English.
+```
+
+The LLM can handle the translation after Whisper returns the transcript.
+
+---
+
+## Automatic translation mode
+
+If you specifically want every audio upload translated to English before Open WebUI sees it, you can modify one line in your proxy.
+
+Current transcription route:
+
+```python
+r = requests.post(
+    f"{WHISPER_URL}?task=transcribe&output=json",
+    files=files
+)
+```
+
+Change it to:
+
+```python
+r = requests.post(
+    f"{WHISPER_URL}?task=translate&output=json",
+    files=files
+)
+```
+
+Now when Open WebUI thinks it's asking for a transcription, the proxy will always return an English translation instead.
+
+Flow becomes:
+
+```text
+French audio
+      ↓
+Open WebUI
+      ↓
+/v1/audio/transcriptions
+      ↓
+Proxy
+      ↓
+Whisper translate
+      ↓
+English text
+```
+
+Open WebUI won't know the difference.
+
+---
+
+## Better version: selectable mode
+
+A nice enhancement would be adding an environment variable:
+
+```python
+import os
+
+TASK = os.getenv("WHISPER_TASK", "transcribe")
+```
+
+Then:
+
+```python
+r = requests.post(
+    f"{WHISPER_URL}?task={TASK}&output=json",
+    files=files
+)
+```
+
+Run the container as:
+
+```bash
+docker run -d \
+  --name whisper-proxy \
+  -e WHISPER_TASK=translate \
+  --add-host=host-gateway:host-gateway \
+  -p 8000:8000 \
+  whisper-proxy
+```
+
+or:
+
+```bash
+-e WHISPER_TASK=transcribe
+```
+
+depending on what you want.
+
+That gives you a simple switch between transcription and translation without rebuilding the image.
+
+Before changing anything, I'd test:
+
+1. `http://localhost:9000/asr?task=translate&output=json`
+2. `http://localhost:8000/v1/audio/translations`
+
+with a non-English audio file. If both work, then the remaining question is just how you want Open WebUI to consume the translated text.
+
+Final option would be to run 2x dockers one for transcribe and one for translate, problem is that you would have to change this each time in the Opewebui admin settings!
